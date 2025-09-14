@@ -4,65 +4,76 @@ import fetch from 'node-fetch';
 const GAS_URL =
   'https://script.google.com/macros/s/AKfycby7GJoRA6wXRm8jqalZf69pvamXz0HnKt4rPxlrP2BJnmcC5Pckt83G2AnqU_dR3gIczg/exec';
 
+const sendJson = (res, statusCode, text) => {
+  const buf = Buffer.from(text, 'utf8');
+  res.writeHead(statusCode, {
+    'Content-Type': 'application/json',
+    'Content-Encoding': 'identity',
+    'Cache-Control': 'no-store, no-transform',
+    'Content-Length': buf.length,
+    'Connection': 'close'
+  });
+  res.end(buf);
+};
+
 const server = http.createServer(async (req, res) => {
-  // Ping
   if (req.method === 'GET' && req.url === '/') {
-    const body = Buffer.from('ok', 'utf8');
-    res.statusCode = 200;
-    res.setHeader('Content-Type', 'text/plain');
-    res.setHeader('Content-Length', body.length);
-    res.setHeader('Connection', 'close');
-    return res.end(body);
+    const buf = Buffer.from('ok', 'utf8');
+    res.writeHead(200, {
+      'Content-Type': 'text/plain',
+      'Content-Length': buf.length,
+      'Connection': 'close'
+    });
+    return res.end(buf);
   }
 
-  // Proxy cho Zalo
   if (req.method === 'POST' && req.url === '/zalo-proxy') {
-    try {
-      let body = '';
-      req.on('data', (chunk) => (body += chunk));
-      req.on('end', async () => {
-        // Forward y nguyên JSON nhận được
+    let raw = '';
+    req.on('data', chunk => (raw += chunk));
+    req.on('end', async () => {
+      // 1) XÁC THỰC JSON
+      let payload;
+      try {
+        payload = JSON.parse(raw);
+      } catch (e) {
+        const out = JSON.stringify({
+          version: 'chatbot',
+          content: { messages: [
+            { type: 'text',
+              text: `❌ Proxy: JSON không hợp lệ. Body nhận được (50 ký tự đầu): ${String(raw).slice(0,50)}`
+            }
+          ] }
+        });
+        return sendJson(res, 200, out);
+      }
+
+      // 2) FORWARD JSON HỢP LỆ SANG GAS
+      try {
         const upstream = await fetch(GAS_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: body || '{}'
+          body: JSON.stringify(payload)
         });
-
-        const text = await upstream.text();   // đọc trọn để tránh stream/chunk
-        const buf  = Buffer.from(text, 'utf8');
-
-        // Ép header đúng chuẩn Zalo yêu cầu
-        res.statusCode = 200;                 // Zalo cần 200
-        res.setHeader('Content-Type', 'application/json'); // KHÔNG ;charset
-        res.setHeader('Cache-Control', 'no-store, no-transform');
-        res.setHeader('Content-Encoding', 'identity');     // không nén
-        res.setHeader('Content-Length', buf.length);       // bắt buộc
-        res.setHeader('Connection', 'close');              // tránh giữ kết nối
-        return res.end(buf);
-      });
-    } catch (err) {
-      const text = JSON.stringify({
-        version: 'chatbot',
-        content: { messages: [{ type: 'text', text: `Proxy error: ${err.message}` }] }
-      });
-      const buf = Buffer.from(text, 'utf8');
-      res.statusCode = 200;
-      res.setHeader('Content-Type', 'application/json');
-      res.setHeader('Content-Encoding', 'identity');
-      res.setHeader('Content-Length', buf.length);
-      res.setHeader('Connection', 'close');
-      return res.end(buf);
-    }
+        const text = await upstream.text();
+        return sendJson(res, 200, text); // trả y nguyên cho Zalo
+      } catch (err) {
+        const out = JSON.stringify({
+          version: 'chatbot',
+          content: { messages: [{ type: 'text', text: `Proxy error: ${err.message}` }] }
+        });
+        return sendJson(res, 200, out);
+      }
+    });
     return;
   }
 
-  // 404 các route khác
-  res.statusCode = 404;
-  res.setHeader('Content-Type', 'text/plain');
-  const notFound = Buffer.from('Not Found', 'utf8');
-  res.setHeader('Content-Length', notFound.length);
-  res.setHeader('Connection', 'close');
-  res.end(notFound);
+  const nf = Buffer.from('Not Found', 'utf8');
+  res.writeHead(404, {
+    'Content-Type': 'text/plain',
+    'Content-Length': nf.length,
+    'Connection': 'close'
+  });
+  res.end(nf);
 });
 
 server.listen(process.env.PORT || 3000);
