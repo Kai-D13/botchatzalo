@@ -1,57 +1,68 @@
-import express from 'express';
+import http from 'http';
 import fetch from 'node-fetch';
 
-const app = express();
-// Nhận JSON
-app.use(express.json({ limit: '1mb' }));
+const GAS_URL =
+  'https://script.google.com/macros/s/AKfycby7GJoRA6wXRm8jqalZf69pvamXz0HnKt4rPxlrP2BJnmcC5Pckt83G2AnqU_dR3gIczg/exec';
 
-// Apps Script Web App URL của bạn
-const GAS_URL = 'https://script.google.com/macros/s/AKfycby7GJoRA6wXRm8jqalZf69pvamXz0HnKt4rPxlrP2BJnmcC5Pckt83G2AnqU_dR3gIczg/exec';
-
-// Proxy cho Zalo
-app.post('/zalo-proxy', async (req, res) => {
-  try {
-    // (Debug) xem Zalo gửi gì tới proxy
-    console.log('IN:', JSON.stringify(req.body));
-
-    // Forward sang Apps Script
-    const upstream = await fetch(GAS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body || {})
-    });
-
-    const text = await upstream.text(); // đọc toàn bộ để không stream
-    console.log('OUT:', text);
-
-    // Ép header chuẩn JSON và không chunked
-    const bytes = Buffer.byteLength(text, 'utf8');
-    res.setHeader('Content-Type', 'application/json');            // KHÔNG kèm ;charset
-    res.setHeader('Cache-Control', 'no-store, no-transform');
-    res.setHeader('Content-Encoding', 'identity');                // tránh nén
-    res.removeHeader('Transfer-Encoding');                        // tránh chunked
-    res.setHeader('Content-Length', String(bytes));               // bắt buộc
+const server = http.createServer(async (req, res) => {
+  // Ping
+  if (req.method === 'GET' && req.url === '/') {
+    const body = Buffer.from('ok', 'utf8');
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Length', body.length);
     res.setHeader('Connection', 'close');
-
-    // Dùng end() để Node không tự thêm gì nữa
-    return res.status(200).end(text, 'utf8');                     // Zalo cần 200
-  } catch (err) {
-    const body = JSON.stringify({
-      version: "chatbot",
-      content: { messages: [{ type: "text", text: `Proxy error: ${err.message}` }] }
-    });
-    const bytes = Buffer.byteLength(body, 'utf8');
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Encoding', 'identity');
-    res.removeHeader('Transfer-Encoding');
-    res.setHeader('Content-Length', String(bytes));
-    res.setHeader('Connection', 'close');
-    return res.status(200).end(body, 'utf8');
+    return res.end(body);
   }
+
+  // Proxy cho Zalo
+  if (req.method === 'POST' && req.url === '/zalo-proxy') {
+    try {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', async () => {
+        // Forward y nguyên JSON nhận được
+        const upstream = await fetch(GAS_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body || '{}'
+        });
+
+        const text = await upstream.text();   // đọc trọn để tránh stream/chunk
+        const buf  = Buffer.from(text, 'utf8');
+
+        // Ép header đúng chuẩn Zalo yêu cầu
+        res.statusCode = 200;                 // Zalo cần 200
+        res.setHeader('Content-Type', 'application/json'); // KHÔNG ;charset
+        res.setHeader('Cache-Control', 'no-store, no-transform');
+        res.setHeader('Content-Encoding', 'identity');     // không nén
+        res.setHeader('Content-Length', buf.length);       // bắt buộc
+        res.setHeader('Connection', 'close');              // tránh giữ kết nối
+        return res.end(buf);
+      });
+    } catch (err) {
+      const text = JSON.stringify({
+        version: 'chatbot',
+        content: { messages: [{ type: 'text', text: `Proxy error: ${err.message}` }] }
+      });
+      const buf = Buffer.from(text, 'utf8');
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Content-Encoding', 'identity');
+      res.setHeader('Content-Length', buf.length);
+      res.setHeader('Connection', 'close');
+      return res.end(buf);
+    }
+    return;
+  }
+
+  // 404 các route khác
+  res.statusCode = 404;
+  res.setHeader('Content-Type', 'text/plain');
+  const notFound = Buffer.from('Not Found', 'utf8');
+  res.setHeader('Content-Length', notFound.length);
+  res.setHeader('Connection', 'close');
+  res.end(notFound);
 });
 
-// Ping
-app.get('/', (_req, res) => res.type('text').send('ok'));
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('listening on ' + port));
+server.listen(process.env.PORT || 3000);
